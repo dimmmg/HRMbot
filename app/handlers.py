@@ -1,11 +1,3 @@
-from packages.core.cart import (
-    get_service_status,
-    get_service_qty,
-    add_or_set_service,
-    remove_service,
-    change_qty
-)
-
 import os
 import io
 import asyncio
@@ -23,16 +15,22 @@ from telegram import (
 )
 from telegram.ext import ContextTypes
 
-import sheets
-from config import ADMINS, EMPLOYEE_NAMES
-from states import user_data, UserState, services_data
+from app import sheets
+from app.config import ADMINS, EMPLOYEE_NAMES
+from app.states import user_data, UserState, services_data
 
-# =================== Константы UI/логов ===================
+from packages.core.cart import (
+    get_service_status,
+    get_service_qty,
+    add_or_set_service,
+    remove_service,
+    change_qty
+)
+
 PAGE_SIZE = 5
 LOGS_DIR = "logs"
 LOG_TAIL_LINES = 300
 
-# =================== Быстрые словари цен ===================
 PRICE_PHYSICAL: Dict[str, float] = {}
 PRICE_LEGAL: Dict[str, float] = {}
 
@@ -47,12 +45,9 @@ def rebuild_price_maps():
         PRICE_LEGAL[name] = float(s.get("price_legal", 0) or 0)
 
 def prime_price_maps():
-    """Вызов из bot.py после загрузки услуг."""
     rebuild_price_maps()
 
-# =================== Утилиты ===================
 def _ensure_session(update: Update) -> int:
-    """Гарантируем user_data[user_id]."""
     user = update.effective_user
     user_id = user.id
     if user_id not in user_data:
@@ -73,41 +68,6 @@ def _build_main_keyboard(user_id: int) -> ReplyKeyboardMarkup:
         rows.append([KeyboardButton("➕ Добавить задачу")])
         rows.append([KeyboardButton("📄 Логи сейчас"), KeyboardButton("♻️ Очистить логи")])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
-
-def get_service_status(user_id: int, service_name: str) -> bool:
-    order = user_data.get(user_id, {}).get('order', {})
-    services = order.get('services', [])
-    return any(s['name'] == service_name for s in services)
-
-def get_service_qty(user_id: int, service_name: str) -> int:
-    order = user_data.get(user_id, {}).get('order', {})
-    for s in order.get('services', []):
-        if s['name'] == service_name:
-            return int(s.get('qty', 1))
-    return 0
-
-def add_or_set_service(user_id: int, svc_name: str, price: float, qty: int = 1):
-    if 'order' not in user_data[user_id]:
-        user_data[user_id]['order'] = {}
-    if 'services' not in user_data[user_id]['order']:
-        user_data[user_id]['order']['services'] = []
-    services = user_data[user_id]['order']['services']
-    for s in services:
-        if s['name'] == svc_name:
-            s['qty'] = max(1, int(qty))
-            s['price'] = float(price)
-            return
-    services.append({'name': svc_name, 'price': float(price), 'qty': max(1, int(qty))})
-
-def remove_service(user_id: int, svc_name: str):
-    services = user_data[user_id]['order'].get('services', [])
-    user_data[user_id]['order']['services'] = [s for s in services if s['name'] != svc_name]
-
-def change_qty(user_id: int, svc_name: str, delta: int):
-    for s in user_data[user_id]['order'].get('services', []):
-        if s['name'] == svc_name:
-            s['qty'] = max(1, int(s.get('qty', 1)) + int(delta))
-            return
 
 async def _safe_edit(query, text, reply_markup=None, parse_mode="Markdown"):
     try:
@@ -135,19 +95,15 @@ def _tail_file(path: str, lines: int = 200) -> bytes:
     try:
         with open(path, "rb") as f:
             data = f.read()
-        # простой хвост — без больших оптимизаций
         parts = data.splitlines()[-lines:]
         return b"\n".join(parts) + b"\n"
     except Exception:
         return b""
 
-# =================== Дебаунс синка корзины ===================
 def _schedule_cart_sync(context: ContextTypes.DEFAULT_TYPE, user_id: int, delay: float = 1.5):
     name = f"cart_sync_{user_id}"
-    # отменяем прежние отложенные записи
     for job in context.job_queue.get_jobs_by_name(name):
         job.schedule_removal()
-    # планируем новую
     context.job_queue.run_once(persist_cart_job, delay, name=name, data={"user_id": user_id})
 
 async def persist_cart_job(context):
@@ -155,10 +111,8 @@ async def persist_cart_job(context):
     order = user_data.get(user_id, {}).get("order", {})
     if not order:
         return
-    # I/O в поток
     await asyncio.to_thread(sheets.save_cart_to_sheet, user_id, order)
 
-# =================== Команды/кнопки ===================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = _ensure_session(update)
     user_data[user_id]['state'] = UserState.MAIN_MENU
@@ -203,28 +157,23 @@ async def start_add_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in ADMINS:
         await update.message.reply_text("⛔ Доступно только администраторам.")
         return
-    # выбор сотрудника inline
     kb = []
     for uid, name in EMPLOYEE_NAMES.items():
         kb.append([InlineKeyboardButton(name, callback_data=f"task_emp:{uid}")])
     await update.message.reply_text("Кому поставить задачу?", reply_markup=InlineKeyboardMarkup(kb))
 
-# =================== Текстовый ввод ===================
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = _ensure_session(update)
     text = (update.message.text or "").strip()
 
-    # админ: мгновенный просмотр логов
     if text == "📄 Логи сейчас" and user_id in ADMINS:
         await send_logs_now(update, context)
         return
 
-    # админ: очистка логов
     if text == "♻️ Очистить логи" and user_id in ADMINS:
         await clear_logs(update, context)
         return
 
-    # ввод названия проекта
     if user_data[user_id].get('state') == UserState.ORDER_PROJECT_NAME:
         project = text
         if not project:
@@ -232,15 +181,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         user_data[user_id]['order']['project_name'] = project
 
-        # Попробуем восстановить корзину
         saved = await asyncio.to_thread(sheets.load_cart_from_sheet, user_id)
         if saved:
-            # saved: [{'name', 'qty'}]
             restored = []
             for item in saved:
                 name = item['name']
                 qty = int(item.get('qty', 1))
-                price = PRICE_PHYSICAL.get(name, 0.0)  # физ по умолчанию
+                price = PRICE_PHYSICAL.get(name, 0.0)
                 if user_data[user_id]['order'].get('form_type') == 'Юридическое лицо':
                     price = PRICE_LEGAL.get(name, 0.0)
                 restored.append({'name': name, 'price': price, 'qty': qty})
@@ -250,7 +197,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_services_page(update, context, page=0)
         return
 
-    # мастер добавления задач (этапы после выбора сотрудника в callback)
     adding = user_data[user_id].get("tmp_task", {})
     stage = adding.get("stage")
     if stage == "title":
@@ -265,7 +211,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if stage == "project":
         adding["project"] = text
-        # Сохраняем в таблицу
         employee = adding.get("employee_name")
         title = adding.get("title")
         deadline = adding.get("deadline")
@@ -273,7 +218,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ok = await asyncio.to_thread(sheets.add_task_row, employee, title, deadline, project)
         if ok:
             await update.message.reply_text("✅ Задача добавлена.")
-            # Уведомим сотрудника, если знаем его id
             target_uid = adding.get("employee_id")
             if target_uid:
                 try:
@@ -289,12 +233,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data[user_id]["tmp_task"] = {}
         return
 
-    # дефолт
     await update.message.reply_text("⚠️ Я не понял это сообщение. Используйте меню.", reply_markup=_build_main_keyboard(user_id))
 
-# =================== Пагинация услуг ===================
 async def show_services_page(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
-    # Услуги уже загружены при старте. Мапы цен тоже.
     all_ids = list(services_data.keys())
     if not all_ids:
         await (update.callback_query.message.edit_text if update.callback_query else update.message.reply_text)(
@@ -317,9 +258,9 @@ async def show_services_page(update: Update, context: ContextTypes.DEFAULT_TYPE,
         svc = services_data[sid]
         name = svc['name']
         price = PRICE_PHYSICAL.get(name, 0.0) if form_type == 'Физическое лицо' else PRICE_LEGAL.get(name, 0.0)
-        selected = _get_service_status(user_id, name)
+        selected = get_service_status(user_id, name)
         mark = "✅" if selected else "❌"
-        qty = _get_service_qty(user_id, name)
+        qty = get_service_qty(user_id, name)
         message += f"{mark} *{name}* — {int(price)} руб./шт."
         if selected:
             message += f"  (×{qty})"
@@ -347,7 +288,6 @@ async def show_services_page(update: Update, context: ContextTypes.DEFAULT_TYPE,
     else:
         await update.message.reply_text(message, reply_markup=markup, parse_mode="Markdown")
 
-# =================== Управление количеством ===================
 async def show_manage_qty_ui(update: Update, context: ContextTypes.DEFAULT_TYPE, sid: str):
     svc = services_data.get(sid)
     if not svc:
@@ -358,12 +298,12 @@ async def show_manage_qty_ui(update: Update, context: ContextTypes.DEFAULT_TYPE,
     name = svc['name']
     price = PRICE_PHYSICAL.get(name, 0.0) if form_type == 'Физическое лицо' else PRICE_LEGAL.get(name, 0.0)
 
-    qty = _get_service_qty(user_id, name)
+    qty = get_service_qty(user_id, name)
     if qty <= 0:
-        _add_or_set_service(user_id, name, price, 1)
+        add_or_set_service(user_id, name, price, 1)
         _schedule_cart_sync(context, user_id)
 
-    qty = _get_service_qty(user_id, name)
+    qty = get_service_qty(user_id, name)
     message = f"*{name}* — {int(price)} руб./шт.\n\nКоличество: *{qty}*"
     kb = [
         [
@@ -382,7 +322,6 @@ async def show_manage_qty_ui(update: Update, context: ContextTypes.DEFAULT_TYPE,
     else:
         await update.message.reply_text(message, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
-# =================== Корзина и подтверждение ===================
 async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = _ensure_session(update)
     order = user_data[user_id]['order']
@@ -404,7 +343,6 @@ async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message += f"\n*Итого:* {total} руб."
 
     kb = []
-    # кнопки для редактирования каждой позиции
     for sid, sd in services_data.items():
         in_cart = any(s['name'] == sd['name'] for s in services)
         if in_cart:
@@ -449,15 +387,12 @@ async def show_order_confirmation(update: Update, context: ContextTypes.DEFAULT_
     ]
     await _safe_edit(update.callback_query, message, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
-# =================== Задачи (рендер/фильтр/done) ===================
 async def _render_tasks(update_or_query, context: ContextTypes.DEFAULT_TYPE, mode: str = "active"):
-    """mode: active|done"""
     if isinstance(update_or_query, Update):
         user_id = _ensure_session(update_or_query)
         chat = update_or_query.message
         query = None
     else:
-        # CallbackQuery
         query = update_or_query
         user_id = query.from_user.id
 
@@ -472,7 +407,6 @@ async def _render_tasks(update_or_query, context: ContextTypes.DEFAULT_TYPE, mod
             await chat.reply_text(text)
         return
 
-    # сохраним индексную карту для отметки done
     idx_map = {}
     lines = [f"📋 *{'Актуальные' if mode=='active' else 'Завершённые'} задачи:*", ""]
     for idx, t in enumerate(tasks, 1):
@@ -480,7 +414,7 @@ async def _render_tasks(update_or_query, context: ContextTypes.DEFAULT_TYPE, mod
         deadline = t.get("deadline") or t.get("Дедлайн") or ""
         project = t.get("project") or t.get("Проект") or ""
         status = t.get("status") or t.get("Статус") or ""
-        lines.append(f"{idx}. *{title}*  ·  {deadline}  ·  {project}  ·  {status}")
+        lines.append(f"{idx}. *{title}* ·  {deadline}  ·  {project}  ·  {status}")
         idx_map[idx] = {"title": title, "deadline": deadline, "project": project}
     user_data[user_id]['tasks_idx_map'] = idx_map
     text = "\n".join(lines)
@@ -497,14 +431,12 @@ async def _render_tasks(update_or_query, context: ContextTypes.DEFAULT_TYPE, mod
     else:
         await _safe_edit(query, text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
-# =================== CallbackQuery ===================
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = _ensure_session(update)
     data = query.data
 
-    # выбор формы
     if data.startswith("form_"):
         form_type = 'Физическое лицо' if data == 'form_physical' else 'Юридическое лицо'
         user_data[user_id]['order']['form_type'] = form_type
@@ -512,7 +444,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await _safe_edit(query, f"Выбрана форма: *{form_type}*\n\nВведите название проекта:", parse_mode="Markdown")
         return
 
-    # выбор сотрудника (мастер задач)
     if data.startswith("task_emp:"):
         try:
             target_id = int(data.split(":")[1])
@@ -528,7 +459,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await _safe_edit(query, f"📝 Введите *название* задачи для {employee_name}:", parse_mode="Markdown")
         return
 
-    # пагинация
     if data.startswith("page:"):
         try:
             p = int(data.split(":")[1])
@@ -537,7 +467,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await show_services_page(update, context, p)
         return
 
-    # выбор услуги
     if data.startswith("select:"):
         sid = data.split(":")[1]
         svc = services_data.get(sid)
@@ -547,12 +476,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         form = user_data[user_id]['order'].get('form_type', 'Физическое лицо')
         name = svc['name']
         price = PRICE_PHYSICAL.get(name, 0.0) if form == 'Физическое лицо' else PRICE_LEGAL.get(name, 0.0)
-        _add_or_set_service(user_id, name, price, 1)
+        add_or_set_service(user_id, name, price, 1)
         _schedule_cart_sync(context, user_id)
         await show_manage_qty_ui(update, context, sid)
         return
 
-    # управление количеством
     if data.startswith("manage:"):
         sid = data.split(":")[1]
         await show_manage_qty_ui(update, context, sid)
@@ -566,16 +494,15 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             return
         name = svc['name']
         if data.startswith("qty_inc:"):
-            _change_qty(user_id, name, 1)
+            change_qty(user_id, name, 1)
         elif data.startswith("qty_dec:"):
-            _change_qty(user_id, name, -1)
+            change_qty(user_id, name, -1)
         else:
-            _remove_service(user_id, name)
+            remove_service(user_id, name)
         _schedule_cart_sync(context, user_id)
         await show_manage_qty_ui(update, context, sid)
         return
 
-    # корзина
     if data == "show_cart":
         await show_cart(update, context)
         return
@@ -593,9 +520,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     if data == "confirm_order":
         order = user_data[user_id]['order']
         username = user_data[user_id].get('username', '')
-        # Запись в таблицу — фоном
         await asyncio.to_thread(sheets.copy_template_and_fill_data, username, order)
-        # очистим корзину
         user_data[user_id]['order']['services'] = []
         await _safe_edit(query, "✅ Заказ сохранён! Возврат в меню.")
         user_data[user_id]['state'] = UserState.MAIN_MENU
@@ -610,7 +535,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await _safe_edit(query, "❌ Заказ отменён.")
         return
 
-    # фильтры задач
     if data.startswith("tasks_filter:"):
         _, mode = data.split(":", 1)
         if mode not in ("active", "done"):
@@ -618,7 +542,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await _render_tasks(query, context, mode=mode)
         return
 
-    # отметка задачи как выполненной
     if data.startswith("task_done:"):
         try:
             idx = int(data.split(":")[1])
@@ -646,10 +569,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             await _safe_edit(query, "❌ Не удалось обновить статус в таблице.")
         return
 
-    # fallback
     await query.answer("Неизвестная команда")
 
-# =================== Логи: разовая отправка + периодическая ===================
 async def send_logs_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
     os.makedirs(LOGS_DIR, exist_ok=True)
     path = os.path.join(LOGS_DIR, "bot.log")
@@ -679,7 +600,6 @@ async def clear_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Не удалось очистить: {e}")
 
 async def logs_push_job(context):
-    """Периодическая рассылка логов админам и очистка файла после отправки."""
     try:
         os.makedirs(LOGS_DIR, exist_ok=True)
         log_path = os.path.join(LOGS_DIR, "bot.log")
@@ -696,7 +616,6 @@ async def logs_push_job(context):
                 await context.bot.send_document(chat_id=admin_id, document=InputFile(bio, filename=fname), caption="Авто-лог (каждые 6 часов)")
             except Exception:
                 pass
-        # очистка после рассылки
         try:
             with open(log_path, "w", encoding="utf-8"):
                 pass
@@ -705,15 +624,11 @@ async def logs_push_job(context):
     except Exception:
         logging.exception("logs_push_job failed")
 
-# =================== Напоминания (заглушки быстрого формата) ===================
 async def reminders_hourly(context):
-    # при необходимости: проверка задач с дедлайнами в ближайший час и отправка
     return
 
 async def reminders_daily(context):
-    # при необходимости: ежедневные дайджесты
     return
 
 async def reminders_weekly(context):
-    # при необходимости: недельные дайджесты
     return

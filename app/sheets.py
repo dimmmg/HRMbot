@@ -1,4 +1,3 @@
-# sheets.py — только Google Sheets (Drive полностью убран)
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -6,7 +5,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from dateutil import parser as dateparser
 
-from config import SERVICE_ACCOUNT_FILE, SPREADSHEET_ID
+from app.config import SERVICE_ACCOUNT_FILE, SPREADSHEET_ID
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
@@ -19,12 +18,7 @@ def _get_client():
     creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
     return gspread.authorize(creds)
 
-# ---------- УСЛУГИ ----------
 def load_services_from_sheet(services_data: Dict[str, dict]):
-    """
-    Читает лист 'Услуги' с колонками: Название | Цена_Физ | Цена_Юр
-    Наполняет словарь services_data (ключи - строковые индексы).
-    """
     try:
         client = _get_client()
         sh = client.open_by_key(SPREADSHEET_ID)
@@ -40,7 +34,6 @@ def load_services_from_sheet(services_data: Dict[str, dict]):
     except Exception as e:
         print("[sheets] load_services_from_sheet error:", e)
 
-# ---------- ЛОГИ ----------
 def log_login(employee_name: str, user_id: int):
     try:
         client = _get_client()
@@ -55,13 +48,7 @@ def log_login(employee_name: str, user_id: int):
     except Exception as e:
         print("[sheets] log_login error:", e)
 
-# ---------- КОРЗИНА (persist) ----------
 def save_cart_to_sheet(user_id: int, order: dict):
-    """
-    Сохраняет корзину пользователя в лист 'Корзины'.
-    Структура строк: user_id | проект | форма | услуга | количество | timestamp
-    Перед записью переписываем лист без строк данного user_id.
-    """
     try:
         client = _get_client()
         sh = client.open_by_key(SPREADSHEET_ID)
@@ -105,7 +92,6 @@ def save_cart_to_sheet(user_id: int, order: dict):
         print("[sheets] save_cart_to_sheet error:", e)
 
 def load_cart_from_sheet(user_id: int) -> List[dict]:
-    """Возвращает список позиций из 'Корзины' данного пользователя: [{name, qty}]"""
     try:
         client = _get_client()
         sh = client.open_by_key(SPREADSHEET_ID)
@@ -124,15 +110,7 @@ def load_cart_from_sheet(user_id: int) -> List[dict]:
         print("[sheets] load_cart_from_sheet error:", e)
         return []
 
-# ---------- Сохранение заказа в шаблон ----------
 def copy_template_and_fill_data(username: str, order: dict):
-    """
-    Копирует шаблон 'ШАБЛОН фин.проект' и заполняет:
-      A1 - project_name
-      B1 - form_type
-      A5.. - названия услуг
-      C5.. - количествo
-    """
     try:
         client = _get_client()
         sh = client.open_by_key(SPREADSHEET_ID)
@@ -162,12 +140,7 @@ def copy_template_and_fill_data(username: str, order: dict):
     except Exception as e:
         print("[sheets] copy_template_and_fill_data error:", e)
 
-# ---------- ЗАДАЧИ ----------
 def load_tasks_for_employee(employee_name: str, mode: str = "active") -> list[dict]:
-    """
-    Читает лист 'Задачи'
-    Ожидаемые колонки: Сотрудник | Название | Описание | Дедлайн | Статус | Проект
-    """
     try:
         client = _get_client()
         sh = client.open_by_key(SPREADSHEET_ID)
@@ -193,13 +166,12 @@ def load_tasks_for_employee(employee_name: str, mode: str = "active") -> list[di
         return []
 
 def set_task_status(employee_name: str, title: str, deadline_str: str, new_status: str) -> bool:
-    """Ищет строку по (Сотрудник, Название, Дедлайн) и меняет Статус."""
     try:
         client = _get_client()
         sh = client.open_by_key(SPREADSHEET_ID)
         ws = sh.worksheet("Задачи")
         cells = ws.get_all_records()
-        for idx, r in enumerate(cells, start=2):  # 1 — заголовки
+        for idx, r in enumerate(cells, start=2):
             if (r.get("Сотрудник") or "").strip() == (employee_name or "").strip() \
                and (r.get("Название") or "").strip() == (title or "").strip() \
                and (r.get("Дедлайн") or "").strip() == (deadline_str or "").strip():
@@ -211,7 +183,6 @@ def set_task_status(employee_name: str, title: str, deadline_str: str, new_statu
         return False
 
 def add_task_row(employee_name: str, title: str, project: str, deadline: str, description: str, status: str = "В работе") -> bool:
-    """Добавляет новую задачу строкой в лист 'Задачи'."""
     try:
         client = _get_client()
         sh = client.open_by_key(SPREADSHEET_ID)
@@ -226,9 +197,7 @@ def add_task_row(employee_name: str, title: str, project: str, deadline: str, de
         print("[sheets] add_task_row error:", e)
         return False
 
-# ---------- «Мой заработок» ----------
 def load_earnings_for_employee(employee_name: str) -> Optional[dict]:
-    """Читает лист 'Заработок': Сотрудник | Сумма до вычета налога | Налог | Чистая зарплата"""
     try:
         client = _get_client()
         sh = client.open_by_key(SPREADSHEET_ID)
@@ -248,9 +217,7 @@ def load_earnings_for_employee(employee_name: str) -> Optional[dict]:
         print("[sheets] load_earnings_for_employee error:", e)
         return None
 
-# ---------- Проекты (все вкладки кроме системных) ----------
 def list_all_projects() -> List[str]:
-    """Список вкладок-«проектов» (все листы, кроме системных)."""
     try:
         client = _get_client()
         sh = client.open_by_key(SPREADSHEET_ID)
