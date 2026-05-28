@@ -1,0 +1,7 @@
+services:
+  bot:
+    build: .
+    container_name: otdel_bot
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
